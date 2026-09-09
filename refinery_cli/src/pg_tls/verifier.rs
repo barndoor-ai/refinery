@@ -1,5 +1,6 @@
 //! Custom [`rustls::client::danger::ServerCertVerifier`] implementations for
-//! the [`Verification::ChainOnly`] and [`Verification::None`] tiers.
+//! the [`super::Verification::ChainOnly`] and [`super::Verification::None`]
+//! tiers.
 //!
 //! Copy of `bdai-platform/libs/pg-tls/src/verifier.rs`; the two must stay
 //! behaviourally identical. See `super`'s header for why this is a copy.
