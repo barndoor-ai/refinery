@@ -41,15 +41,26 @@
 //!
 //! # Mode mapping
 //!
-//! | DSN `sslmode` | rewritten to | verification |
-//! |---|---|---|
-//! | absent | *(DSN left untouched)* | [`Verification::None`] |
-//! | `disable` | `disable` | [`Verification::None`] |
-//! | `allow` | `prefer` | [`Verification::None`] |
-//! | `prefer` | `prefer` | [`Verification::None`] |
-//! | `require` | `require` | [`Verification::None`], **or [`Verification::ChainOnly`] when a CA bundle is configured** |
-//! | `verify-ca` | `require` | [`Verification::ChainOnly`] |
-//! | `verify-full` | `require` | [`Verification::Full`] |
+//! Every row but `disable` is **conditional on the trust anchors**, because
+//! that is how libpq behaves: `sslrootcert` sets `have_rootcert`, and
+//! `if (have_rootcert) SSL_set_verify(conn->ssl, SSL_VERIFY_PEER, verify_cb);`
+//! is not scoped by `sslmode`. "Anchored" below means
+//! [`TrustAnchors::is_configured`] — an `sslrootcert` naming a bundle file, or
+//! the reserved `sslrootcert=system`.
+//!
+//! | DSN `sslmode` | rewritten to | no anchors | anchored |
+//! |---|---|---|---|
+//! | absent | *(DSN left untouched)* | [`Verification::None`] | [`Verification::ChainOnly`] (or [`Verification::Full`] for `system`, which promotes the mode — see below) |
+//! | `disable` | `disable` | [`Verification::None`] | [`Verification::None`] — no SSL at all, so the anchors go unused |
+//! | `allow` | `prefer` | [`Verification::None`] | [`Verification::ChainOnly`] |
+//! | `prefer` | `prefer` | [`Verification::None`] | [`Verification::ChainOnly`] |
+//! | `require` | `require` | [`Verification::None`] | [`Verification::ChainOnly`] |
+//! | `verify-ca` | `require` | **hard error** | [`Verification::ChainOnly`] |
+//! | `verify-full` | `require` | **hard error** | [`Verification::Full`] |
+//!
+//! `sslrootcert=system` additionally *requires* `verify-full` (absent
+//! `sslmode` is promoted to it; anything weaker is a hard error), per
+//! PostgreSQL's documented rule — see [`dsn::resolve`].
 //!
 //! # Caveats, in the order they will bite you
 //!
@@ -59,8 +70,9 @@
 //!   `prefer`, which tries TLS first. Both end up "encrypted if the server
 //!   supports it", which is the property operators pick `allow` for.
 //!
-//! * **`require` verifies the chain when — and only when — a CA bundle is
-//!   configured.** That is libpq parity, and the parity is conditional:
+//! * **Every non-`disable` mode verifies the chain when — and only when —
+//!   trust anchors are configured.** That is libpq parity, and the parity is
+//!   conditional on the anchors, not on the mode:
 //!   > For backwards compatibility with earlier versions of PostgreSQL, if a
 //!   > root CA file exists, the behavior of `sslmode=require` will be the same
 //!   > as that of `verify-ca`, meaning the server certificate is validated
@@ -70,26 +82,39 @@
 //!   `sslrootcert`'s own entry in
 //!   [32.1.2](https://www.postgresql.org/docs/current/libpq-connect.html) says
 //!   the same unconditionally — "if the file exists, the server's certificate
-//!   will be verified to be signed by one of these authorities".) So with an
-//!   `sslrootcert` in the DSN, `require` resolves to
-//!   [`Verification::ChainOnly`]; with no bundle it resolves to
-//!   [`Verification::None`] — encryption without authentication, which is all
-//!   libpq's `require` promises in that case. Do not "harden" the no-bundle
-//!   case into `verify-full`: it would break every deployment pointed at a
-//!   private-CA or self-signed server that correctly asked for `require`.
-//!   Equally, do not drop the escalation — silently ignoring a configured
-//!   bundle is a fail-open.
+//!   will be verified to be signed by one of these authorities".) libpq
+//!   implements this with a `have_rootcert` flag set purely on the root file
+//!   being present and then `if (have_rootcert) SSL_set_verify(conn->ssl,
+//!   SSL_VERIFY_PEER, verify_cb);` — no `sslmode` in the condition. So the
+//!   escalation here applies to `require`, `prefer`, `allow` **and** an absent
+//!   `sslmode` alike; `disable` is the sole exception, because libpq does no
+//!   SSL at all there and never loads the root file. With no anchors, those
+//!   modes resolve to [`Verification::None`] — encryption without
+//!   authentication, which is all libpq's `require` promises in that case. Do
+//!   not "harden" the no-anchor case into `verify-full`: it would break every
+//!   deployment pointed at a private-CA or self-signed server that correctly
+//!   asked for `require`. Equally, do not narrow the escalation back to
+//!   `require` alone, and do not drop it — silently ignoring configured
+//!   anchors is a fail-open.
 //!
 //! * **rustls requires a `subjectAltName` and does not fall back to CN.** A
 //!   certificate issued with only `/CN=host` will be rejected under
 //!   `verify-full` no matter how the CA bundle is configured. Such a server
 //!   needs `verify-ca`, or `require` (whose escalated
 //!   [`Verification::ChainOnly`] tolerates the name mismatch), or `require`
-//!   with no bundle at all.
+//!   with no anchors at all.
 //!
-//! * **A configured CA bundle augments the public webpki roots, it never
-//!   replaces them.** An unreadable bundle, or one containing no certificates,
-//!   is a hard error rather than a silent fallback to public roots only.
+//! * **A configured CA bundle *is* the trust store; it never adds to the
+//!   public webpki roots.** libpq's `sslrootcert` names the whole trust store
+//!   (`SSL_CTX_load_verify_locations(ctx, sslrootcert, NULL)`), so
+//!   [`TrustAnchors::Bundle`] means "exactly these certificates and nothing
+//!   else". The public web PKI is reachable only through the explicit,
+//!   reserved opt-in `sslrootcert=system` ([`TrustAnchors::System`]). Adding
+//!   the bundle to the public roots instead would mean a certificate issued by
+//!   any public CA for any hostname satisfies `verify-ca` and the escalated
+//!   `require` — which, because those tiers do not check the name, is a full
+//!   MITM. An unreadable bundle, or one containing no certificates, is a hard
+//!   error rather than a silent fallback to the public roots.
 //!
 //! * **Parameters this module does not own are preserved byte-for-byte.** Only
 //!   `sslmode`, `sslrootcert`, `sslcert`, `sslkey` and `currentSchema` are
@@ -137,12 +162,42 @@ pub enum Verification {
     Full,
 }
 
+/// Where the connector's trust anchors come from -- libpq's `sslrootcert`.
+///
+/// libpq's `sslrootcert` names *the* trust store, it does not add to a default
+/// one: `SSL_CTX_load_verify_locations(ctx, sslrootcert, NULL)`. The public web
+/// PKI is a separate, explicit opt-in reached only by the reserved value
+/// `sslrootcert=system`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrustAnchors {
+    /// No trust anchors. Only valid for the tiers that do not verify.
+    None,
+    /// The public webpki roots -- libpq's `sslrootcert=system`.
+    System,
+    /// Exactly the certificates in this file, and nothing else.
+    Bundle(PathBuf),
+}
+
+impl TrustAnchors {
+    /// Whether an anchor source was configured at all.
+    ///
+    /// This is the libpq `have_rootcert` flag: it gates the chain-verification
+    /// escalation for every non-`disable` mode. See [`dsn::resolve`].
+    pub fn is_configured(&self) -> bool {
+        !matches!(self, TrustAnchors::None)
+    }
+}
+
 /// The outcome of [`dsn::resolve`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolved {
     /// The rewritten DSN — safe to hand to `postgres::Config`.
     pub dsn: String,
     /// The mode requested in the original DSN. `None` means it was absent.
+    ///
+    /// `sslrootcert=system` with no `sslmode` reports
+    /// `Some(SslMode::VerifyFull)`, because PostgreSQL documents `system` as
+    /// changing the default mode to `verify-full`.
     pub requested: Option<SslMode>,
     /// The `sslmode` `postgres` will act on: `"disable"`, `"prefer"` or
     /// `"require"`. For an absent `sslmode` this reports `"prefer"`, which is
@@ -150,12 +205,16 @@ pub struct Resolved {
     pub effective: &'static str,
     /// The verification tier the connector must apply.
     ///
-    /// This is the *post-escalation* tier: `sslmode=require` with a CA bundle
-    /// configured reports [`Verification::ChainOnly`], matching libpq. See
+    /// This is the *post-escalation* tier: any non-`disable` mode with trust
+    /// anchors configured reports at least [`Verification::ChainOnly`],
+    /// matching libpq's mode-independent `have_rootcert` gate. See
     /// [`dsn::resolve`].
     pub verification: Verification,
-    /// Extra trust anchors, from an `sslrootcert` lifted out of the DSN.
-    pub ca_bundle_path: Option<PathBuf>,
+    /// The connector's trust store, from an `sslrootcert` lifted out of the
+    /// DSN. [`TrustAnchors::Bundle`] *replaces* the public roots rather than
+    /// adding to them; [`TrustAnchors::System`] is the explicit opt-in to the
+    /// public web PKI.
+    pub trust_anchors: TrustAnchors,
     /// The `currentSchema` lifted out of the DSN, used as the fallback for
     /// refinery's migration-table schema. **Refinery-specific**: the sibling
     /// `pg-tls` crate has no equivalent field.
@@ -188,9 +247,8 @@ pub fn prepare(raw_dsn: &str) -> anyhow::Result<(PgConfig, Resolved)> {
 impl SslMode {
     /// The canonical libpq spelling.
     ///
-    /// Unused by the CLI today; kept so this module stays a line-for-line
-    /// mirror of the sibling `pg-tls` crate (see the module header).
-    #[allow(dead_code)]
+    /// Used by [`dsn::resolve`]'s error messages, which name the requested mode
+    /// but never the DSN.
     pub fn as_str(self) -> &'static str {
         match self {
             SslMode::Disable => "disable",
@@ -228,7 +286,15 @@ impl SslMode {
         }
     }
 
-    /// The verification tier this mode implies.
+    /// The verification tier this mode implies **on its own**.
+    ///
+    /// This is the mode-only base tier, not the whole story: [`dsn::resolve`]
+    /// owns the anchor-conditional escalation (any non-`disable` mode with
+    /// [`TrustAnchors::is_configured`] rises to at least
+    /// [`Verification::ChainOnly`]) and the rule that `verify-ca` /
+    /// `verify-full` with no anchor source is a hard error. Read
+    /// [`Resolved::verification`], never this function, for what the connector
+    /// will actually do.
     pub fn verification(self) -> Verification {
         match self {
             SslMode::Disable | SslMode::Allow | SslMode::Prefer | SslMode::Require => {
@@ -255,29 +321,57 @@ mod tests {
     /// `raw_dsn` instead of `resolved.dsn` — the driver rejects `allow`,
     /// `verify-ca` and `verify-full` as connection-string parse errors, so
     /// those three rows would not even reach an assertion.
+    ///
+    /// The `verify-*` rows carry an `sslrootcert`: those two modes now require
+    /// a trust anchor, so without one they are a hard error before the driver
+    /// is ever reached.
     #[test]
     fn prepare_maps_every_mode_from_a_raw_dsn() {
-        let cases: &[(&str, PgSslMode, &str, Verification)] = &[
-            ("disable", PgSslMode::Disable, "disable", Verification::None),
-            ("allow", PgSslMode::Prefer, "prefer", Verification::None),
-            ("prefer", PgSslMode::Prefer, "prefer", Verification::None),
-            ("require", PgSslMode::Require, "require", Verification::None),
+        // `extra` is appended to the query verbatim.
+        let cases: &[(&str, &str, PgSslMode, &str, Verification)] = &[
+            (
+                "disable",
+                "",
+                PgSslMode::Disable,
+                "disable",
+                Verification::None,
+            ),
+            ("allow", "", PgSslMode::Prefer, "prefer", Verification::None),
+            (
+                "prefer",
+                "",
+                PgSslMode::Prefer,
+                "prefer",
+                Verification::None,
+            ),
+            (
+                "require",
+                "",
+                PgSslMode::Require,
+                "require",
+                Verification::None,
+            ),
             (
                 "verify-ca",
+                "&sslrootcert=/etc/ssl/ca.pem",
                 PgSslMode::Require,
                 "require",
                 Verification::ChainOnly,
             ),
             (
                 "verify-full",
+                "&sslrootcert=/etc/ssl/ca.pem",
                 PgSslMode::Require,
                 "require",
                 Verification::Full,
             ),
         ];
 
-        for (mode, expected_ssl_mode, effective, verification) in cases {
-            let raw = format!("{}?application_name=refinery&sslmode={}", BASE, mode);
+        for (mode, extra, expected_ssl_mode, effective, verification) in cases {
+            let raw = format!(
+                "{}?application_name=refinery&sslmode={}{}",
+                BASE, mode, extra
+            );
             let (pg_config, resolved) = prepare(&raw)
                 .unwrap_or_else(|err| panic!("sslmode={} must prepare: {}", mode, err));
 
@@ -344,8 +438,8 @@ mod tests {
             "require + sslrootcert must reach the connector as a verifying tier"
         );
         assert_eq!(
-            resolved.ca_bundle_path.as_deref(),
-            Some(std::path::Path::new("/etc/ssl/ca.pem"))
+            resolved.trust_anchors,
+            TrustAnchors::Bundle(PathBuf::from("/etc/ssl/ca.pem"))
         );
         assert_eq!(resolved.current_schema.as_deref(), Some("llm_gw"));
     }
@@ -362,8 +456,17 @@ mod tests {
                 .effective,
             "disable"
         );
-        for mode in ["allow", "prefer", "require", "verify-ca", "verify-full"].iter() {
-            let effective = prepare(&format!("{}?sslmode={}", BASE, mode))
+        // The `verify-*` rows need a trust anchor to resolve at all.
+        for (mode, extra) in [
+            ("allow", ""),
+            ("prefer", ""),
+            ("require", ""),
+            ("verify-ca", "&sslrootcert=/etc/ssl/ca.pem"),
+            ("verify-full", "&sslrootcert=/etc/ssl/ca.pem"),
+        ]
+        .iter()
+        {
+            let effective = prepare(&format!("{}?sslmode={}{}", BASE, mode, extra))
                 .unwrap()
                 .1
                 .effective;
