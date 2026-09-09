@@ -96,8 +96,7 @@ fn run_migrations(
         // Postgres does NOT go through `Runner::run(&mut config)`: that path
         // rebuilds the URL from the parsed `Config`, dropping the query string
         // (and therefore `sslmode`), and hardcodes `postgres::NoTls`. We build
-        // the client ourselves from the raw DSN instead — see `crate::pg_tls`
-        // and BCP-4264.
+        // the client ourselves from the raw DSN instead -- see `crate::pg_tls`.
         ConfigDbType::Postgres => {
             cfg_if::cfg_if! {
                 if #[cfg(feature = "postgresql")] {
@@ -110,7 +109,7 @@ fn run_migrations(
                     // Same precedence as before this change: in `-e <ENV_VAR>`
                     // mode `DATABASE_PASSWORD`, when set, overrides any password
                     // carried in the DSN. In `--config <toml>` mode it is NOT
-                    // consulted at all — `config()`'s toml branch never touched
+                    // consulted at all -- `config()`'s toml branch never touched
                     // it, and applying it there would let an unrelated exported
                     // `DATABASE_PASSWORD` override the file's `db_pass`.
                     // Setting it on the parsed config rather than splicing it
@@ -142,9 +141,9 @@ fn run_migrations(
                         .set_migration_table_name(table_name)
                         // `resolved.current_schema` precedes
                         // `config.db_schema()` deliberately. In `-e <ENV_VAR>`
-                        // mode the two have the SAME source — `Config`'s
+                        // mode the two have the SAME source -- `Config`'s
                         // `TryFrom<Url>` already sets `db_schema` from the
-                        // DSN's `currentSchema` — but they disagree on
+                        // DSN's `currentSchema` -- but they disagree on
                         // decoding: `Url::query_pairs()` is form-urlencoded, so
                         // a `+` becomes a space, while `dsn.rs`'s
                         // `decode_value` percent-decodes and leaves the `+`
@@ -207,11 +206,11 @@ fn config(config_location: &Path, env_var_opt: Option<&str>) -> anyhow::Result<C
 ///
 /// `Config::from_env_var` cannot be used for this: it parses the URL and
 /// `build_db_url` then rebuilds it without the query, which is exactly the bug
-/// BCP-4264 fixes. So the environment variable is read directly.
+/// `crate::pg_tls` exists to fix. So the environment variable is read directly.
 ///
 /// A `refinery.toml` cannot express a query string, so for the `--config` mode
 /// the DSN is synthesized from the file the same way `build_db_url` would have
-/// done — nothing is lost, and the Postgres path then gets TLS in that mode
+/// done -- nothing is lost, and the Postgres path then gets TLS in that mode
 /// too. The `[main] db_schema` key is picked up separately, from the parsed
 /// `Config`.
 #[cfg(feature = "postgresql")]

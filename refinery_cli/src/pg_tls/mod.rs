@@ -1,13 +1,13 @@
 //! Postgres TLS support for the refinery CLI.
 //!
-//! # Provenance — keep this in sync
+//! # Provenance -- keep this in sync
 //!
 //! This module is a **copy** of `bdai-platform/libs/pg-tls/src/lib.rs` (and the
 //! sibling `dsn.rs`, `tls.rs`, `verifier.rs` files, each of which names its
 //! counterpart in its own header). It is a copy rather than a dependency
 //! because refinery lives in a separate repository and this fork is rebased on
 //! upstream refinery; it cannot take a path or git dependency on the platform
-//! workspace. **The two must stay behaviourally identical** — if you change the
+//! workspace. **The two must stay behaviorally identical** -- if you change the
 //! mode mapping, the query-string handling or the verifier semantics here, make
 //! the same change there, and vice versa.
 //!
@@ -26,18 +26,18 @@
 //! consumed query values are percent-decoded here with `percent-encoding`,
 //! where the sibling still uses `url::form_urlencoded::parse` and therefore
 //! turns a `+` into a space that the driver would have left literal. The
-//! sibling needs the same fix — see `dsn.rs`'s header.
+//! sibling needs the same fix -- see `dsn.rs`'s header.
 //!
 //! # Why this exists
 //!
-//! `postgres`/`tokio-postgres` understands only three `sslmode` values —
-//! `disable`, `prefer` and `require` — and rejects every other libpq value as a
-//! **connection-string parse error**. It also rejects `sslrootcert`, `sslcert`
-//! and `sslkey` outright as unknown options. Operators and Helm charts,
-//! however, write libpq DSNs. [`dsn::resolve`] rewrites the DSN into something
-//! `postgres::Config` accepts while remembering the verification tier the
-//! operator actually asked for, and [`tls::client_config`] builds a rustls
-//! connector configured for that tier.
+//! `postgres`/`tokio-postgres` understands only three `sslmode` values --
+//! `disable`, `prefer` and `require` -- and rejects every other libpq value as
+//! a **connection-string parse error**. It also rejects `sslrootcert`,
+//! `sslcert` and `sslkey` outright as unknown options. Operators and Helm
+//! charts, however, write libpq DSNs. [`dsn::resolve`] rewrites the DSN into
+//! something `postgres::Config` accepts while remembering the verification
+//! tier the operator actually asked for, and [`tls::client_config`] builds a
+//! rustls connector configured for that tier.
 //!
 //! # Mode mapping
 //!
@@ -45,13 +45,13 @@
 //! that is how libpq behaves: `sslrootcert` sets `have_rootcert`, and
 //! `if (have_rootcert) SSL_set_verify(conn->ssl, SSL_VERIFY_PEER, verify_cb);`
 //! is not scoped by `sslmode`. "Anchored" below means
-//! [`TrustAnchors::is_configured`] — an `sslrootcert` naming a bundle file, or
+//! [`TrustAnchors::is_configured`] -- an `sslrootcert` naming a bundle file, or
 //! the reserved `sslrootcert=system`.
 //!
 //! | DSN `sslmode` | rewritten to | no anchors | anchored |
 //! |---|---|---|---|
-//! | absent | *(DSN left untouched)* | [`Verification::None`] | [`Verification::ChainOnly`] (or [`Verification::Full`] for `system`, which promotes the mode — see below) |
-//! | `disable` | `disable` | [`Verification::None`] | [`Verification::None`] — no SSL at all, so the anchors go unused |
+//! | absent | *(DSN left untouched)* | [`Verification::None`] | [`Verification::ChainOnly`] (or [`Verification::Full`] for `system`, which promotes the mode -- see below) |
+//! | `disable` | `disable` | [`Verification::None`] | [`Verification::None`] -- no SSL at all, so the anchors go unused |
 //! | `allow` | `prefer` | [`Verification::None`] | [`Verification::ChainOnly`] |
 //! | `prefer` | `prefer` | [`Verification::None`] | [`Verification::ChainOnly`] |
 //! | `require` | `require` | [`Verification::None`] | [`Verification::ChainOnly`] |
@@ -60,17 +60,17 @@
 //!
 //! `sslrootcert=system` additionally *requires* `verify-full` (absent
 //! `sslmode` is promoted to it; anything weaker is a hard error), per
-//! PostgreSQL's documented rule — see [`dsn::resolve`].
+//! PostgreSQL's documented rule -- see [`dsn::resolve`].
 //!
 //! # Caveats, in the order they will bite you
 //!
-//! * **`allow` → `prefer` is an approximation.** libpq's `allow` attempts a
+//! * **`allow` -> `prefer` is an approximation.** libpq's `allow` attempts a
 //!   *plaintext* connection first and only negotiates TLS if the server
 //!   insists. `postgres` cannot express that ordering, so `allow` is mapped to
 //!   `prefer`, which tries TLS first. Both end up "encrypted if the server
 //!   supports it", which is the property operators pick `allow` for.
 //!
-//! * **Every non-`disable` mode verifies the chain when — and only when —
+//! * **Every non-`disable` mode verifies the chain when -- and only when --
 //!   trust anchors are configured.** That is libpq parity, and the parity is
 //!   conditional on the anchors, not on the mode:
 //!   > For backwards compatibility with earlier versions of PostgreSQL, if a
@@ -81,20 +81,20 @@
 //!   ([PostgreSQL docs, 32.19.1](https://www.postgresql.org/docs/current/libpq-ssl.html);
 //!   `sslrootcert`'s own entry in
 //!   [32.1.2](https://www.postgresql.org/docs/current/libpq-connect.html) says
-//!   the same unconditionally — "if the file exists, the server's certificate
+//!   the same unconditionally -- "if the file exists, the server's certificate
 //!   will be verified to be signed by one of these authorities".) libpq
 //!   implements this with a `have_rootcert` flag set purely on the root file
 //!   being present and then `if (have_rootcert) SSL_set_verify(conn->ssl,
-//!   SSL_VERIFY_PEER, verify_cb);` — no `sslmode` in the condition. So the
+//!   SSL_VERIFY_PEER, verify_cb);` -- no `sslmode` in the condition. So the
 //!   escalation here applies to `require`, `prefer`, `allow` **and** an absent
 //!   `sslmode` alike; `disable` is the sole exception, because libpq does no
 //!   SSL at all there and never loads the root file. With no anchors, those
-//!   modes resolve to [`Verification::None`] — encryption without
+//!   modes resolve to [`Verification::None`] -- encryption without
 //!   authentication, which is all libpq's `require` promises in that case. Do
 //!   not "harden" the no-anchor case into `verify-full`: it would break every
 //!   deployment pointed at a private-CA or self-signed server that correctly
 //!   asked for `require`. Equally, do not narrow the escalation back to
-//!   `require` alone, and do not drop it — silently ignoring configured
+//!   `require` alone, and do not drop it -- silently ignoring configured
 //!   anchors is a fail-open.
 //!
 //! * **rustls requires a `subjectAltName` and does not fall back to CN.** A
@@ -112,7 +112,7 @@
 //!   reserved opt-in `sslrootcert=system` ([`TrustAnchors::System`]). Adding
 //!   the bundle to the public roots instead would mean a certificate issued by
 //!   any public CA for any hostname satisfies `verify-ca` and the escalated
-//!   `require` — which, because those tiers do not check the name, is a full
+//!   `require` -- which, because those tiers do not check the name, is a full
 //!   MITM. An unreadable bundle, or one containing no certificates, is a hard
 //!   error rather than a silent fallback to the public roots.
 //!
@@ -191,7 +191,7 @@ impl TrustAnchors {
 /// The outcome of [`dsn::resolve`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolved {
-    /// The rewritten DSN — safe to hand to `postgres::Config`.
+    /// The rewritten DSN -- safe to hand to `postgres::Config`.
     pub dsn: String,
     /// The mode requested in the original DSN. `None` means it was absent.
     ///
@@ -225,11 +225,11 @@ pub struct Resolved {
 ///
 /// This is the whole of the Postgres call site's pure logic, extracted so it
 /// can be tested without a server: [`dsn::resolve`] rewrites the DSN, and the
-/// **rewritten** DSN — never the raw one — is what `postgres::Config` parses.
-/// Parsing the raw DSN instead is the exact bug BCP-4264 fixes (`verify-ca` and
-/// friends are connection-string parse errors to the driver), so a test that
-/// asserts on the returned `Config`'s `get_ssl_mode()` fails if the rewrite is
-/// bypassed.
+/// **rewritten** DSN -- never the raw one -- is what `postgres::Config` parses.
+/// Parsing the raw DSN instead is the exact bug this module exists to fix
+/// (`verify-ca` and friends are connection-string parse errors to the driver),
+/// so a test that asserts on the returned `Config`'s `get_ssl_mode()` fails if
+/// the rewrite is bypassed.
 ///
 /// The caller is responsible for the impure remainder: applying any password
 /// override, choosing `NoTls` for [`Resolved::effective`] `== "disable"`, and
@@ -318,7 +318,7 @@ mod tests {
     ///
     /// Every case starts from a **raw** libpq DSN, query string and all, and
     /// asserts on both halves of the returned pair. Red if `prepare` parsed
-    /// `raw_dsn` instead of `resolved.dsn` — the driver rejects `allow`,
+    /// `raw_dsn` instead of `resolved.dsn` -- the driver rejects `allow`,
     /// `verify-ca` and `verify-full` as connection-string parse errors, so
     /// those three rows would not even reach an assertion.
     ///

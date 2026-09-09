@@ -3,7 +3,7 @@
 //! tiers.
 //!
 //! Copy of `bdai-platform/libs/pg-tls/src/verifier.rs`; the two must stay
-//! behaviourally identical. See `super`'s header for why this is a copy.
+//! behaviorally identical. See `super`'s header for why this is a copy.
 
 use std::sync::Arc;
 
@@ -32,7 +32,7 @@ pub(crate) fn allow_hostname_mismatch(
     }
 }
 
-/// Verifies the chain but tolerates a hostname mismatch — libpq `verify-ca`.
+/// Verifies the chain but tolerates a hostname mismatch -- libpq `verify-ca`.
 #[derive(Debug)]
 pub(crate) struct ChainOnlyVerifier {
     inner: Arc<WebPkiServerVerifier>,
@@ -93,7 +93,7 @@ impl ServerCertVerifier for ChainOnlyVerifier {
     }
 }
 
-/// Accepts any server certificate — encryption without authentication, which
+/// Accepts any server certificate -- encryption without authentication, which
 /// is what libpq's `require` (and `prefer`, and `allow`) do.
 #[derive(Debug)]
 pub(crate) struct AcceptAnyVerifier {
@@ -161,8 +161,9 @@ mod tests {
 
     /// A hostname mismatch is tolerated, everything else is not.
     ///
-    /// Exercised through `allow_hostname_mismatch`, which is the exact function
-    /// `ChainOnlyVerifier::verify_server_cert` calls — not a copy of its logic.
+    /// Exercised through `allow_hostname_mismatch`, which is the exact
+    /// function `ChainOnlyVerifier::verify_server_cert` calls -- not a copy of
+    /// its logic.
     #[test]
     fn hostname_mismatch_maps_to_ok() {
         allow_hostname_mismatch(Err(rustls::Error::InvalidCertificate(

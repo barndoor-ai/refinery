@@ -1,13 +1,13 @@
-//! libpq → `postgres` DSN rewriting.
+//! libpq -> `postgres` DSN rewriting.
 //!
 //! Copy of `bdai-platform/libs/pg-tls/src/dsn.rs`; the two must stay
-//! behaviourally identical. See `super`'s header for why this is a copy and for
+//! behaviorally identical. See `super`'s header for why this is a copy and for
 //! the list of intentional divergences (here: `currentSchema` is additionally
 //! consumed, and errors are `anyhow`).
 //!
 //! The base of the URL (scheme, credentials, authority, path) is copied
 //! verbatim, because round-tripping the whole URL through `url::Url` would
-//! renormalise the authority — which matters for the comma-separated
+//! renormalize the authority -- which matters for the comma-separated
 //! multi-host and percent-encoded unix-socket forms `postgres` accepts.
 //!
 //! The query string is handled the same way, one level down: it is split on
@@ -16,7 +16,7 @@
 //! re-encoding every parameter would corrupt the ones we have no business
 //! touching: `form_urlencoded::Serializer` emits a space as `+`, while
 //! `tokio-postgres` percent-decodes query values and would read that `+`
-//! literally — turning `options=-c%20statement_timeout%3D5000` into the
+//! literally -- turning `options=-c%20statement_timeout%3D5000` into the
 //! nonsense `-c+statement_timeout=5000`. A DSN whose query needs no
 //! modification therefore comes back byte-identical.
 //!
@@ -42,7 +42,7 @@ use crate::pg_tls::{Resolved, SslMode, TrustAnchors, Verification};
 /// Matched **case-sensitively**, deliberately: `tokio-postgres` dispatches on
 /// a bare `match key { "sslmode" => ..., key => Err(UnknownOption) }`, so
 /// `SSLMODE=require` is an unknown option there and treating it as an `sslmode`
-/// here would silently invent a behaviour the database driver does not have.
+/// here would silently invent a behavior the database driver does not have.
 const SSL_MODE: &str = "sslmode";
 const SSL_ROOT_CERT: &str = "sslrootcert";
 const SSL_CERT: &str = "sslcert";
@@ -66,26 +66,26 @@ const URL_PREFIXES: [&str; 2] = ["postgres://", "postgresql://"];
 /// * `sslrootcert` is consumed and lifted into [`Resolved::trust_anchors`]
 ///   (`postgres` rejects it as an unknown option). It *is* the trust store, it
 ///   does not add to a default one, and it escalates every non-`disable`
-///   `sslmode` to [`Verification::ChainOnly`] — see below. The reserved value
+///   `sslmode` to [`Verification::ChainOnly`] -- see below. The reserved value
 ///   `system` selects the public webpki roots instead of a file.
 /// * `currentSchema` is consumed and lifted into [`Resolved::current_schema`]
 ///   (same reason), where the CLI uses it as the migration-table schema
 ///   fallback.
 /// * `sslcert` / `sslkey` are a hard error: client-certificate auth is not
-///   implemented, and dropping them would fail open on the operator's intent —
+///   implemented, and dropping them would fail open on the operator's intent --
 ///   silently, as an authentication failure that reads like a bad password.
 /// * every other parameter is preserved **byte-for-byte**, in order, with its
 ///   original percent-encoding intact.
 ///
-/// When nothing is consumed the DSN is returned untouched — no `?` is
-/// appended — and the tier is [`Verification::None`], matching
+/// When nothing is consumed the DSN is returned untouched -- no `?` is
+/// appended -- and the tier is [`Verification::None`], matching
 /// `postgres::Config`'s `Prefer` default.
 ///
 /// # Trust-anchor escalation of every non-`disable` mode
 ///
 /// Any `sslmode` other than `disable` resolves to at least
 /// [`Verification::ChainOnly`] once trust anchors are configured, instead of
-/// [`Verification::None`]. That is libpq's documented behaviour: "if a root CA
+/// [`Verification::None`]. That is libpq's documented behavior: "if a root CA
 /// file exists, the behavior of `sslmode=require` will be the same as that of
 /// `verify-ca`, meaning the server certificate is validated against the CA"
 /// ([PostgreSQL docs, 32.19.1 Client Verification of Server
@@ -96,7 +96,7 @@ const URL_PREFIXES: [&str; 2] = ["postgres://", "postgresql://"];
 /// it sets a `have_rootcert` flag purely on the root file being readable and
 /// then does `if (have_rootcert) SSL_set_verify(conn->ssl, SSL_VERIFY_PEER,
 /// verify_cb);`. So `prefer`, `allow` and an absent `sslmode` escalate too, not
-/// just `require` — scoping the escalation to `require` silently discarded a
+/// just `require` -- scoping the escalation to `require` silently discarded a
 /// bundle supplied with any of the others, a fail-open. `disable` is the one
 /// exception: libpq does no SSL there and never loads the root file, so a
 /// configured `sslrootcert` is simply unused. With **no** anchors those modes
@@ -109,19 +109,19 @@ const URL_PREFIXES: [&str; 2] = ["postgres://", "postgresql://"];
 /// read: `root certificate file "%s" does not exist ... or change sslmode to
 /// disable server certificate verification`. Resolving them to
 /// [`Verification::ChainOnly`] over the public roots instead would mean "any
-/// certificate from any public CA for any hostname" — the tier does not check
-/// the name — which is not verification at all.
+/// certificate from any public CA for any hostname" -- the tier does not check
+/// the name -- which is not verification at all.
 ///
 /// # `sslrootcert=system` implies `verify-full`
 ///
 /// PostgreSQL documents: "When using `sslrootcert=system`, the default
 /// `sslmode` is changed to `verify-full`, and any weaker setting will result in
 /// an error. In most cases it is trivial for anyone to obtain a certificate
-/// trusted by the system for a hostname they control, rendering `verify-ca` and
-/// all weaker modes useless." So `sslrootcert=system` with no `sslmode` is
+/// trusted by the system for a hostname they control, rendering `verify-ca`
+/// and all weaker modes useless." So `sslrootcert=system` with no `sslmode` is
 /// promoted to `verify-full`, and `sslrootcert=system` with any other explicit
-/// mode — `disable`, `require`, `verify-ca` included — is a hard error. That is
-/// what makes "verify-ca over the public web PKI" unrepresentable here.
+/// mode -- `disable`, `require`, `verify-ca` included -- is a hard error. That
+/// is what makes "verify-ca over the public web PKI" unrepresentable here.
 ///
 /// # Only the URL DSN form is supported
 ///
@@ -129,7 +129,7 @@ const URL_PREFIXES: [&str; 2] = ["postgres://", "postgresql://"];
 /// `postgres://` / `postgresql://` prefix: `UrlParser::parse` for the URL form,
 /// falling back to `Parser::parse` for libpq's keyword/value form. This
 /// rewriter only understands the URL form, so a keyword/value DSN is rejected
-/// rather than passed through unexamined — which would leak
+/// rather than passed through unexamined -- which would leak
 /// `sslmode=verify-ca` straight to the driver as a parse failure and misreport
 /// the verification tier for `sslmode=require`.
 pub fn resolve(dsn: &str) -> anyhow::Result<Resolved> {
@@ -186,7 +186,7 @@ pub fn resolve(dsn: &str) -> anyhow::Result<Resolved> {
     }
 
     // `sslrootcert=system` fixes the mode at `verify-full`. PostgreSQL
-    // documents this default change — it is not an invention here: "When using
+    // documents this default change -- it is not an invention here: "When using
     // sslrootcert=system, the default sslmode is changed to verify-full, and
     // any weaker setting will result in an error. In most cases it is trivial
     // for anyone to obtain a certificate trusted by the system for a hostname
@@ -329,7 +329,7 @@ mod tests {
     }
 
     /// Every documented mode, plus absent, maps to the documented effective
-    /// `sslmode` and verification tier — with **no** trust anchors configured.
+    /// `sslmode` and verification tier -- with **no** trust anchors configured.
     ///
     /// `resolve_mode` passes no `sslrootcert`, so `verify-ca` and `verify-full`
     /// are hard errors here (libpq's `sslmode[0] == 'v'` + unreadable root file
@@ -433,7 +433,7 @@ mod tests {
             );
         }
 
-        // Absent `sslmode` escalates too — postgres' own default is `prefer`,
+        // Absent `sslmode` escalates too -- postgres' own default is `prefer`,
         // and libpq loads the root file regardless of the mode.
         let absent = resolve(&format!("{}?sslrootcert=/config/ca.pem", BASE)).unwrap();
         assert_eq!(absent.requested, None);
@@ -456,8 +456,8 @@ mod tests {
         }
 
         for mode in ALL_MODES.iter() {
-            // A bundle for every mode, so `verify-ca`/`verify-full` — which
-            // now require a trust anchor — still get exercised here.
+            // A bundle for every mode, so `verify-ca`/`verify-full` -- which
+            // now require a trust anchor -- still get exercised here.
             let resolved = resolve_mode_with_bundle(mode);
             resolved.dsn.parse::<PgConfig>().unwrap_or_else(|err| {
                 panic!("rewritten DSN for sslmode={} must parse: {}", mode, err)
@@ -486,8 +486,8 @@ mod tests {
         ];
 
         for (mode, expected) in cases {
-            // Every row carries a bundle, so the two `verify-*` rows — which
-            // now require a trust anchor — are still covered.
+            // Every row carries a bundle, so the two `verify-*` rows -- which
+            // now require a trust anchor -- are still covered.
             let cfg = resolve_mode_with_bundle(mode)
                 .dsn
                 .parse::<PgConfig>()
@@ -510,7 +510,7 @@ mod tests {
     ///
     /// Rebuilding the query through `form_urlencoded::Serializer` re-encodes a
     /// space as `+`, which `tokio-postgres` percent-decodes back to a literal
-    /// `+` — so `options=-c%20statement_timeout%3D5000` would reach the server
+    /// `+` -- so `options=-c%20statement_timeout%3D5000` would reach the server
     /// as `-c+statement_timeout=5000`.
     #[test]
     fn unrelated_params_round_trip_byte_for_byte() {
@@ -554,7 +554,7 @@ mod tests {
     ///
     /// Only the rewrite is asserted here, not parseability: `tokio-postgres`
     /// rejects a value-less URL parameter itself (it scans for the next `=`
-    /// across the `&`), so the correct behaviour is to hand its own error
+    /// across the `&`), so the correct behavior is to hand its own error
     /// back to the operator rather than to reshape or silently drop the
     /// segment.
     #[test]
@@ -676,7 +676,7 @@ mod tests {
                 .dsn
                 .parse::<PgConfig>()
                 .expect("DSN with sslrootcert stripped must parse");
-            // Both modes end at a verifying tier — `require` by escalation.
+            // Both modes end at a verifying tier -- `require` by escalation.
             assert_eq!(
                 resolved.verification,
                 Verification::ChainOnly,
@@ -686,7 +686,7 @@ mod tests {
         }
     }
 
-    /// `sslrootcert` with no `sslmode` at all is still lifted — and still
+    /// `sslrootcert` with no `sslmode` at all is still lifted -- and still
     /// escalates. libpq's `have_rootcert` gate does not consult the mode, so an
     /// operator who supplies a bundle and leaves `sslmode` to its default gets
     /// the chain checked rather than silently ignored.
@@ -741,7 +741,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // `require` + CA bundle → ChainOnly (libpq's bundle-conditional parity)
+    // `require` + CA bundle -> ChainOnly (libpq's bundle-conditional parity)
     // ---------------------------------------------------------------------
 
     /// `sslmode=require` with a bundle escalates to `ChainOnly`, and `require`
@@ -753,7 +753,7 @@ mod tests {
     ///
     /// The fork has no non-DSN `TlsSettings` bundle field, so unlike the
     /// sibling's version of this test the "configured" bundle here is the
-    /// DSN's own `sslrootcert` — it is the only source there is.
+    /// DSN's own `sslrootcert` -- it is the only source there is.
     #[test]
     fn require_with_a_configured_bundle_escalates_to_chain_only() {
         let with_bundle = resolve(&format!(
@@ -787,7 +787,7 @@ mod tests {
         assert_eq!(
             without_bundle.verification,
             Verification::None,
-            "require with no bundle stays unverified — libpq promises no more than encryption there"
+            "require with no bundle stays unverified -- libpq promises no more than encryption there"
         );
     }
 
@@ -819,11 +819,11 @@ mod tests {
 
     /// Precedence is unchanged by the escalation.
     ///
-    /// The sibling's version of this test asserts that an explicitly configured
-    /// `TlsSettings` bundle still wins over the DSN's `sslrootcert`
+    /// The sibling's version of this test asserts that an explicitly
+    /// configured `TlsSettings` bundle still wins over the DSN's `sslrootcert`
     /// and that the escalation fires on the winner. The fork has no such
-    /// settings struct — `sslrootcert` is the only bundle source — so only the
-    /// DSN-driven half applies: the escalation must be computed from the
+    /// settings struct -- `sslrootcert` is the only bundle source -- so only
+    /// the DSN-driven half applies: the escalation must be computed from the
     /// **merged** `Resolved::trust_anchors` that the connector actually reads,
     /// not from some earlier value.
     #[test]
@@ -844,11 +844,11 @@ mod tests {
 
     /// The escalation applies to **every** mode but `disable`.
     ///
-    /// libpq's gate is `if (have_rootcert) SSL_set_verify(...)` — not scoped by
-    /// `sslmode` — so a bundle handed to `prefer`, `allow` or no `sslmode` at
-    /// all must be verified against too. Scoping it to `require` (as this test's
-    /// predecessor pinned) silently discarded the bundle for the others: a
-    /// fail-open.
+    /// libpq's gate is `if (have_rootcert) SSL_set_verify(...)` -- not scoped
+    /// by `sslmode` -- so a bundle handed to `prefer`, `allow` or no `sslmode`
+    /// at all must be verified against too. Scoping it to `require` (as this
+    /// test's predecessor pinned) silently discarded the bundle for the
+    /// others: a fail-open.
     ///
     /// Red if the escalation is narrowed back to `Some(SslMode::Require)`, and
     /// red the other way if `disable` starts escalating.
@@ -879,7 +879,7 @@ mod tests {
         let absent = resolve(&format!("{}?sslrootcert=/config/ca.pem", BASE)).unwrap();
         assert_eq!(absent.verification, Verification::ChainOnly);
 
-        // `disable` is the one exception — libpq does no SSL there and never
+        // `disable` is the one exception -- libpq does no SSL there and never
         // loads the root file, so a configured bundle is simply unused.
         let disabled = resolve(&format!(
             "{}?sslmode=disable&sslrootcert=/config/ca.pem",
@@ -901,8 +901,8 @@ mod tests {
     /// `verify-ca` and `verify-full` with no `sslrootcert` are hard errors.
     ///
     /// libpq refuses here too (`sslmode[0] == 'v'` with an unreadable root
-    /// file). Resolving them to `ChainOnly` over the public roots — which is
-    /// what this code used to do — means "any certificate from any public CA
+    /// file). Resolving them to `ChainOnly` over the public roots -- which is
+    /// what this code used to do -- means "any certificate from any public CA
     /// for any hostname", because `ChainOnly` skips the name check. Red if
     /// either mode starts resolving instead of erroring.
     #[test]
@@ -966,7 +966,7 @@ mod tests {
     /// error. In most cases it is trivial for anyone to obtain a certificate
     /// trusted by the system for a hostname they control, rendering `verify-ca`
     /// and all weaker modes useless." That rule is what makes "verify-ca over
-    /// the public web PKI" — the MITM-friendly combination — unrepresentable.
+    /// the public web PKI" -- the MITM-friendly combination -- unrepresentable.
     #[test]
     fn system_trust_anchors_require_verify_full() {
         let promoted = resolve(&format!("{}?sslrootcert=system", BASE)).unwrap();
@@ -1105,12 +1105,12 @@ mod tests {
 
     /// The authority is copied verbatim, which is the whole reason this module
     /// does not round-trip through `url::Url` (module header). A
-    /// percent-encoded password is where a renormalising rewrite would show up
-    /// as a failed login — and the `%3F` is the direct guard on splitting at
+    /// percent-encoded password is where a renormalizing rewrite would show up
+    /// as a failed login -- and the `%3F` is the direct guard on splitting at
     /// the FIRST `?`.
     #[test]
     fn percent_encoded_password_in_the_authority_survives() {
-        // `p@ss?word` — both the `@` and the `?` are percent-encoded, which a
+        // `p@ss?word` -- both the `@` and the `?` are percent-encoded, which a
         // valid URL requires and which this rewriter's first-`?` split
         // depends on.
         const AUTHORITY: &str = "postgresql://user:p%40ss%3Fword@db.example.com:5432/app";
@@ -1137,7 +1137,7 @@ mod tests {
         );
     }
 
-    /// The comma-separated multi-host form the module header names — the other
+    /// The comma-separated multi-host form the module header names -- the other
     /// authority shape `url::Url` would mangle.
     #[test]
     fn comma_separated_multi_host_base_survives() {
@@ -1170,7 +1170,7 @@ mod tests {
     ///
     /// `postgres::Config::from_str` accepts it (dispatching on the absence of a
     /// `postgres://` / `postgresql://` prefix), so without this guard such a
-    /// DSN sails through `resolve` untouched with `requested: None` —
+    /// DSN sails through `resolve` untouched with `requested: None` --
     /// misreporting the tier for `sslmode=require` and leaking
     /// `sslmode=verify-ca` to the driver as a raw parse failure.
     ///
@@ -1202,7 +1202,7 @@ mod tests {
         }
     }
 
-    /// Both URL prefixes `postgres` recognises are accepted, so the guard
+    /// Both URL prefixes `postgres` recognizes are accepted, so the guard
     /// cannot be satisfied by hard-coding one of them.
     #[test]
     fn both_url_prefixes_are_accepted() {
@@ -1232,8 +1232,8 @@ mod tests {
     ///
     /// `tokio-postgres` decodes query values with
     /// `percent_encoding::percent_decode`, so `/etc/ssl/my+ca.pem` is a path
-    /// with a `+` in it. Decoding these with `url::form_urlencoded::parse` —
-    /// the HTML form encoding, where `+` means a space — turned that into
+    /// with a `+` in it. Decoding these with `url::form_urlencoded::parse` --
+    /// the HTML form encoding, where `+` means a space -- turned that into
     /// `/etc/ssl/my ca.pem` and the bundle open failed with ENOENT.
     ///
     /// Red if `decode_value` goes back to `form_urlencoded`.

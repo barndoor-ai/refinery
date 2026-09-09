@@ -1,7 +1,7 @@
 //! Root store and [`rustls::ClientConfig`] construction.
 //!
 //! Copy of `bdai-platform/libs/pg-tls/src/tls.rs`; the two must stay
-//! behaviourally identical. See `super`'s header for why this is a copy and for
+//! behaviorally identical. See `super`'s header for why this is a copy and for
 //! the one intentional divergence: the crypto provider here is `ring`, not
 //! `aws-lc-rs`, because this binary is built statically against musl in a
 //! `FROM scratch` image and `aws-lc-rs` needs cmake/nasm in the builder.
@@ -23,8 +23,8 @@ use crate::pg_tls::{Resolved, TrustAnchors, Verification};
 /// The crypto provider is named explicitly rather than resolved from crate
 /// features.
 ///
-/// `CryptoProvider::from_crate_features()` returns `None` — and the bare
-/// `ClientConfig::builder()` then panics inside its `.expect()` — as soon as
+/// `CryptoProvider::from_crate_features()` returns `None` -- and the bare
+/// `ClientConfig::builder()` then panics inside its `.expect()` -- as soon as
 /// two provider features are unified into a build. Naming the provider means
 /// that can never happen here, whatever else lands in the dependency graph. Do
 /// not reintroduce `ClientConfig::builder()` or
@@ -43,7 +43,7 @@ fn provider() -> Arc<CryptoProvider> {
 /// reserved opt-in `sslrootcert=system` ([`TrustAnchors::System`]). Seeding the
 /// store with the public roots and then *adding* the bundle would mean a
 /// certificate issued by any public CA for any hostname satisfies `verify-ca`
-/// and the escalated `require` — neither of which checks the name — i.e. a
+/// and the escalated `require` -- neither of which checks the name -- i.e. a
 /// MITM that also gets to pick the authentication method.
 ///
 /// An unreadable bundle, or a bundle containing no certificates, is a hard
@@ -103,7 +103,7 @@ pub(crate) fn root_store(trust_anchors: &TrustAnchors) -> anyhow::Result<RootCer
 
 /// Build a [`ClientConfig`] for the tier `resolved` asked for.
 ///
-/// The root store — and therefore the CA bundle — is only read for the tiers
+/// The root store -- and therefore the CA bundle -- is only read for the tiers
 /// that consult it. Note that an `sslrootcert` alongside `sslmode=require` (or
 /// `prefer`, or `allow`, or no `sslmode` at all) is *not* one of the tiers that
 /// skips it: [`crate::pg_tls::dsn::resolve`] escalates every non-`disable` mode
@@ -165,7 +165,7 @@ mod tests {
     use super::*;
     use crate::pg_tls::dsn;
 
-    /// A self-signed CA, PEM-encoded — the same fixture as the sibling
+    /// A self-signed CA, PEM-encoded -- the same fixture as the sibling
     /// `pg-tls` crate's `tests/fixtures/test-ca.pem`. Content is irrelevant
     /// beyond being a parseable X.509 certificate rustls will accept as a
     /// trust anchor, and *not* being a public webpki root.
@@ -208,8 +208,8 @@ mod tests {
     }
 
     /// A `ClientConfig` actually builds for every tier. This is the regression
-    /// test for the crypto-provider panic — no assertion about mode mapping can
-    /// catch it, because the panic happens at construction.
+    /// test for the crypto-provider panic -- no assertion about mode mapping
+    /// can catch it, because the panic happens at construction.
     ///
     /// The verifying tiers need an anchor source now (a verifier over zero
     /// anchors is a hard error), so they are given the public roots.
@@ -245,7 +245,7 @@ mod tests {
     /// there is no publicly signed leaf fixture in this repo to verify against
     /// at test time, and fetching one over the network from a unit test is not
     /// an option. Asserting that the bundle store holds exactly the bundle's
-    /// anchor — and that none of them is a webpki root — catches any
+    /// anchor -- and that none of them is a webpki root -- catches any
     /// reintroduction of a public-roots seed, which is the only way the
     /// fail-open comes back.
     #[test]
@@ -291,7 +291,7 @@ mod tests {
     }
 
     /// A verifier over zero anchors is a configuration bug, not an
-    /// accept-nothing store — and certainly not an accept-anything one.
+    /// accept-nothing store -- and certainly not an accept-anything one.
     #[test]
     fn no_trust_anchors_is_an_error_for_a_verifying_tier() {
         let err = root_store(&TrustAnchors::None)
@@ -361,11 +361,11 @@ mod tests {
     /// After the trust-anchor fix that set is much smaller than it was:
     /// `disable` is the only mode that stays at [`Verification::None`] with a
     /// bundle in play (libpq does no SSL there and never loads the root file),
-    /// plus `require` — and `prefer`, and `allow` — with **no** bundle at all.
-    /// `allow`, `prefer` and `require` *with* a bundle are deliberately absent:
-    /// they escalate to [`Verification::ChainOnly`] and the second half of this
-    /// test pins that, so this test can never again be satisfied by the
-    /// fail-open it used to encode.
+    /// plus `require` -- and `prefer`, and `allow` -- with **no** bundle at
+    /// all. `allow`, `prefer` and `require` *with* a bundle are deliberately
+    /// absent: they escalate to [`Verification::ChainOnly`] and the second
+    /// half of this test pins that, so this test can never again be satisfied
+    /// by the fail-open it used to encode.
     #[test]
     fn unverified_tier_ignores_the_bundle() {
         let dir = tempfile::tempdir().unwrap();
@@ -435,7 +435,7 @@ mod tests {
     /// chain to a trust anchor is still rejected.
     ///
     /// Red if `ChainOnlyVerifier::verify_server_cert` were replaced with a bare
-    /// `Ok(ServerCertVerified::assertion())` — i.e. if `verify-ca` silently
+    /// `Ok(ServerCertVerified::assertion())` -- i.e. if `verify-ca` silently
     /// degraded to accept-any. Every other test in this crate would stay green.
     ///
     /// The verifier is built from [`TrustAnchors::System`] so the assertion
@@ -443,7 +443,7 @@ mod tests {
     ///
     /// The assertion is deliberately only `is_err()`: the fixture CA's validity
     /// window is not the point, so its eventual expiry (or a not-yet-valid
-    /// clock) cannot turn this into a false *pass* — it stays an error either
+    /// clock) cannot turn this into a false *pass* -- it stays an error either
     /// way, just for a different reason.
     #[test]
     fn chain_only_verifier_rejects_untrusted_chain() {
