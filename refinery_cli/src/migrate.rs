@@ -139,26 +139,11 @@ fn run_migrations(
                         .set_abort_missing(missing)
                         .set_target(target)
                         .set_migration_table_name(table_name)
-                        // `resolved.current_schema` precedes
-                        // `config.db_schema()` deliberately. In `-e <ENV_VAR>`
-                        // mode the two have the SAME source -- `Config`'s
-                        // `TryFrom<Url>` already sets `db_schema` from the
-                        // DSN's `currentSchema` -- but they disagree on
-                        // decoding: `Url::query_pairs()` is form-urlencoded, so
-                        // a `+` becomes a space, while `dsn.rs`'s
-                        // `decode_value` percent-decodes and leaves the `+`
-                        // literal, matching what `tokio-postgres` does with
-                        // query values. So `?currentSchema=llm+gw` must resolve
-                        // to `llm+gw`, and only the DSN-derived value gets
-                        // that right. In `--config <toml>` mode
-                        // `resolved.current_schema` is always `None`, so
-                        // `config.db_schema()` still supplies `[main]
-                        // db_schema`.
-                        .set_migration_table_schema(
-                            table_schema
-                                .or(resolved.current_schema.as_deref())
-                                .or(config.db_schema()),
-                        )
+                        .set_migration_table_schema(migration_table_schema(
+                            table_schema,
+                            resolved.current_schema.as_deref(),
+                            config.db_schema(),
+                        ))
                         .run(&mut client)?;
                 } else {
                     panic!("tried to migrate from config for a postgresql database, but the postgresql feature was not enabled!");
@@ -184,6 +169,31 @@ fn run_migrations(
     };
 
     Ok(())
+}
+
+/// The migration table's schema, in precedence order.
+///
+/// `dsn_current_schema` precedes `config_db_schema` deliberately. In
+/// `-e <ENV_VAR>` mode the two have the SAME source -- `Config`'s
+/// `TryFrom<Url>` already sets `db_schema` from the DSN's `currentSchema` --
+/// but they disagree on decoding: `Url::query_pairs()` is form-urlencoded, so a
+/// `+` becomes a space, while `pg_tls::dsn`'s `decode_value` percent-decodes
+/// and leaves the `+` literal, matching what `tokio-postgres` does with query
+/// values. So `?currentSchema=llm+gw` must resolve to `llm+gw`, and only the
+/// DSN-derived value gets that right. In `--config <toml>` mode
+/// `dsn_current_schema` is always `None`, so `config_db_schema` still supplies
+/// `[main] db_schema`.
+///
+/// Extracted from the call site so the ordering is testable: `run_migrations`
+/// needs a database, so an inline `.or()` chain could be reordered without any
+/// test noticing.
+#[cfg(feature = "postgresql")]
+fn migration_table_schema<'a>(
+    table_schema: Option<&'a str>,
+    dsn_current_schema: Option<&'a str>,
+    config_db_schema: Option<&'a str>,
+) -> Option<&'a str> {
+    table_schema.or(dsn_current_schema).or(config_db_schema)
 }
 
 fn config(config_location: &Path, env_var_opt: Option<&str>) -> anyhow::Result<Config> {
@@ -252,4 +262,57 @@ fn postgres_dsn(config_location: &Path, env_var_opt: Option<&str>) -> anyhow::Re
         url.push_str(name);
     }
     Ok(url)
+}
+
+#[cfg(all(test, feature = "postgresql"))]
+mod tests {
+    use super::migration_table_schema;
+
+    /// `--table-schema` is the operator's explicit override and beats both
+    /// other sources.
+    #[test]
+    fn the_cli_flag_wins() {
+        assert_eq!(
+            migration_table_schema(Some("flag"), Some("from_dsn"), Some("from_config")),
+            Some("flag")
+        );
+        assert_eq!(
+            migration_table_schema(Some("flag"), None, None),
+            Some("flag")
+        );
+    }
+
+    /// The DSN's `currentSchema` beats the reparsed config's `db_schema`.
+    ///
+    /// The fixture is the real divergence rather than an abstract ordering:
+    /// `?currentSchema=llm+gw` produces `"llm+gw"` from `pg_tls::dsn`'s
+    /// `percent_decode_str` (which matches `tokio-postgres`) and `"llm gw"`
+    /// from `refinery_core::config`'s `url.query_pairs()`, which is
+    /// `form_urlencoded` and decodes a `+` as a space. Migrating against
+    /// `"llm gw"` would create the migration table in the wrong schema.
+    ///
+    /// Red if the `.or()` chain is reordered back.
+    #[test]
+    fn the_dsn_beats_the_reparsed_config_when_they_disagree() {
+        assert_eq!(
+            migration_table_schema(None, Some("llm+gw"), Some("llm gw")),
+            Some("llm+gw")
+        );
+    }
+
+    /// `--config <toml>` mode: there is no DSN query string, so
+    /// `dsn_current_schema` is always `None` and `[main] db_schema` supplies
+    /// the value.
+    #[test]
+    fn the_config_supplies_the_schema_when_nothing_else_does() {
+        assert_eq!(
+            migration_table_schema(None, None, Some("from_config")),
+            Some("from_config")
+        );
+    }
+
+    #[test]
+    fn no_source_yields_none() {
+        assert_eq!(migration_table_schema(None, None, None), None);
+    }
 }

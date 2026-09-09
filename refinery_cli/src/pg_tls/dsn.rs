@@ -896,6 +896,15 @@ mod tests {
 
     /// The same escalation stated from the DSN's own `sslrootcert`, which is an
     /// operator's obvious first move and used to be lifted and then ignored.
+    ///
+    /// The escalation must be computed from the **merged**
+    /// [`Resolved::trust_anchors`] the connector actually reads, not from some
+    /// earlier value -- hence the assertion on the lifted bundle alongside the
+    /// tier. (The sibling `pg-tls` crate states that as a separate
+    /// precedence test, because it has a `TlsSettings` bundle field that can
+    /// compete with the DSN's. This fork has no such field: `sslrootcert` is
+    /// the only bundle source, so there is nothing for it to win over and the
+    /// two tests collapse into this one.)
     #[test]
     fn require_with_sslrootcert_in_the_dsn_escalates_to_chain_only() {
         let resolved = resolve(&format!(
@@ -918,31 +927,6 @@ mod tests {
             .dsn
             .parse::<PgConfig>()
             .expect("the rewritten DSN must parse");
-    }
-
-    /// Precedence is unchanged by the escalation.
-    ///
-    /// The sibling's version of this test asserts that an explicitly
-    /// configured `TlsSettings` bundle still wins over the DSN's `sslrootcert`
-    /// and that the escalation fires on the winner. The fork has no such
-    /// settings struct -- `sslrootcert` is the only bundle source -- so only
-    /// the DSN-driven half applies: the escalation must be computed from the
-    /// **merged** `Resolved::trust_anchors` that the connector actually reads,
-    /// not from some earlier value.
-    #[test]
-    fn explicit_settings_still_win_over_sslrootcert_at_require() {
-        let resolved = resolve(&format!(
-            "{}?sslmode=require&sslrootcert=/etc/ssl/dsn.pem",
-            BASE
-        ))
-        .unwrap();
-
-        assert_eq!(
-            resolved.trust_anchors,
-            TrustAnchors::Bundle(PathBuf::from("/etc/ssl/dsn.pem")),
-            "the bundle the connector reads is the one lifted from the DSN"
-        );
-        assert_eq!(resolved.verification, Verification::ChainOnly);
     }
 
     /// The escalation applies to **every** mode but `disable`.
@@ -1018,14 +1002,12 @@ mod tests {
                 Err(err) => err,
             };
             let msg = err.to_string();
+            // The mode-specific substring, not a bare `contains(mode)` and not
+            // `contains("sslrootcert")`: the latter is in the fixed help text
+            // whatever the input was, so it can never fail. `sslmode=<mode>` is
+            // falsifiable for both rows.
             assert!(
-                msg.contains("sslrootcert"),
-                "sslmode={}: the error must tell the operator which knob to set: {}",
-                mode,
-                msg
-            );
-            assert!(
-                msg.contains(mode),
+                msg.contains(&format!("sslmode={}", mode)),
                 "sslmode={}: the error must name the mode: {}",
                 mode,
                 msg
@@ -1093,8 +1075,13 @@ mod tests {
                 Err(err) => err,
             };
             let msg = err.to_string();
+            // Asserted as `sslmode=<mode>`, not a bare `contains(mode)`: the
+            // fixed message text already carries the words "requires" and
+            // "requested", so for the `require` row a bare substring check is
+            // satisfied whatever the input was. "verify-full" is likewise in
+            // the fixed text on every row.
             assert!(
-                msg.contains("verify-full") && msg.contains(mode),
+                msg.contains("verify-full") && msg.contains(&format!("sslmode={}", mode)),
                 "sslmode={} + system must be refused, naming both modes: {}",
                 mode,
                 msg
@@ -1116,17 +1103,15 @@ mod tests {
     /// `system` is the reserved keyword, not a relative path called "system".
     ///
     /// Red if the parse became an unconditional `TrustAnchors::Bundle`, which
-    /// would try to `File::open("system")` and fail with ENOENT.
+    /// would try to `File::open("system")` and fail with ENOENT -- and red the
+    /// other way if the keyword check widened to any path *containing*
+    /// "system", which would silently swap an operator's private bundle for
+    /// the public web PKI.
     #[test]
     fn system_is_a_keyword_not_a_path() {
         let resolved = resolve(&format!("{}?sslrootcert=system", BASE)).unwrap();
 
         assert_eq!(resolved.trust_anchors, TrustAnchors::System);
-        assert_ne!(
-            resolved.trust_anchors,
-            TrustAnchors::Bundle(PathBuf::from("system")),
-            "`system` must not be treated as a file path"
-        );
 
         // A path that merely contains "system" is still a bundle.
         let bundle = resolve(&format!(
