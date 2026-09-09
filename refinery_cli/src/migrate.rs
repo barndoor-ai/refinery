@@ -140,10 +140,25 @@ fn run_migrations(
                         .set_abort_missing(missing)
                         .set_target(target)
                         .set_migration_table_name(table_name)
+                        // `resolved.current_schema` precedes
+                        // `config.db_schema()` deliberately. In `-e <ENV_VAR>`
+                        // mode the two have the SAME source — `Config`'s
+                        // `TryFrom<Url>` already sets `db_schema` from the
+                        // DSN's `currentSchema` — but they disagree on
+                        // decoding: `Url::query_pairs()` is form-urlencoded, so
+                        // a `+` becomes a space, while `dsn.rs`'s
+                        // `decode_value` percent-decodes and leaves the `+`
+                        // literal, matching what `tokio-postgres` does with
+                        // query values. So `?currentSchema=llm+gw` must resolve
+                        // to `llm+gw`, and only the DSN-derived value gets
+                        // that right. In `--config <toml>` mode
+                        // `resolved.current_schema` is always `None`, so
+                        // `config.db_schema()` still supplies `[main]
+                        // db_schema`.
                         .set_migration_table_schema(
                             table_schema
-                                .or(config.db_schema())
-                                .or(resolved.current_schema.as_deref()),
+                                .or(resolved.current_schema.as_deref())
+                                .or(config.db_schema()),
                         )
                         .run(&mut client)?;
                 } else {
