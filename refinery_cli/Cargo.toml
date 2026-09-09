@@ -16,7 +16,17 @@ path = "src/main.rs"
 
 [features]
 default = ["mysql", "postgresql", "sqlite-bundled", "mssql"]
-postgresql = ["refinery-core/postgres"]
+# The Postgres path builds its own `postgres::Client` with a rustls connector
+# (see `src/pg_tls`), so the TLS stack is gated on this feature too — images are
+# built with `--no-default-features -F postgresql`.
+postgresql = [
+    "refinery-core/postgres",
+    "dep:percent-encoding",
+    "dep:rustls",
+    "dep:rustls-pemfile",
+    "dep:tokio-postgres-rustls",
+    "dep:webpki-roots",
+]
 mysql = ["refinery-core/mysql"]
 sqlite = ["refinery-core/rusqlite"]
 sqlite-bundled = ["sqlite", "refinery-core/rusqlite-bundled"]
@@ -35,9 +45,25 @@ walkdir = "2.3.1"
 cfg-if = "1.0.0"
 tokio = { version = "1.0", features = ["full"], optional = true }
 
+# Postgres TLS (see `src/pg_tls`). `ring` rather than `aws-lc-rs`: this binary
+# is built statically against musl in a `FROM scratch` image, and `aws-lc-rs`
+# needs cmake/nasm in the builder. There is deliberately NO direct `postgres`
+# dependency — the driver types are reached through `refinery_core::postgres`,
+# so the version cannot split from the one refinery-core links against.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"], optional = true }
+rustls-pemfile = { version = "2", optional = true }
+tokio-postgres-rustls = { version = "0.14", default-features = false, features = ["ring"], optional = true }
+# Query-value decoding. Named explicitly rather than reached through `url`'s
+# re-export: `url::form_urlencoded` is the HTML form encoding, where `+` means a
+# space, but `tokio-postgres` percent-decodes query values and leaves `+`
+# literal. See `src/pg_tls/dsn.rs`'s header.
+percent-encoding = { version = "2", optional = true }
+webpki-roots = { version = "1", optional = true }
+
 [dev-dependencies]
 predicates = "3"
 assert_cmd = "2"
+tempfile = "3"
 
 [package.metadata.deb]
 name = "refinery"
