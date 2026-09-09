@@ -157,6 +157,11 @@ pub enum Verification {
     None,
     /// Verify the chain against the root store, but tolerate a hostname
     /// mismatch. Chain, expiry and revocation failures still reject.
+    ///
+    /// Only valid over a private [`TrustAnchors::Bundle`]. Pairing it with
+    /// [`TrustAnchors::System`] is a hard error in [`tls::client_config`],
+    /// because a name-blind check over the public web PKI accepts any publicly
+    /// issued certificate for any name.
     ChainOnly,
     /// Full webpki verification, including hostname.
     Full,
@@ -209,6 +214,13 @@ pub struct Resolved {
     /// anchors configured reports at least [`Verification::ChainOnly`],
     /// matching libpq's mode-independent `have_rootcert` gate. See
     /// [`dsn::resolve`].
+    ///
+    /// [`Verification::ChainOnly`] paired with [`TrustAnchors::System`] is an
+    /// **invalid** combination and never resolves: with no hostname check, any
+    /// publicly issued certificate for any name would be accepted.
+    /// [`dsn::resolve`] forbids it (PostgreSQL's `sslrootcert=system` implies
+    /// `verify-full` rule) and [`tls::client_config`] refuses to build it, so a
+    /// hand-built `Resolved` cannot reach it either.
     pub verification: Verification,
     /// The connector's trust store, from an `sslrootcert` lifted out of the
     /// DSN. [`TrustAnchors::Bundle`] *replaces* the public roots rather than

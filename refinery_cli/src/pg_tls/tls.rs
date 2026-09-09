@@ -109,6 +109,10 @@ pub(crate) fn root_store(trust_anchors: &TrustAnchors) -> anyhow::Result<RootCer
 /// skips it: [`crate::pg_tls::dsn::resolve`] escalates every non-`disable` mode
 /// with configured anchors to [`Verification::ChainOnly`], so the bundle is
 /// read and an unreadable one is a hard error.
+///
+/// [`Verification::ChainOnly`] over [`TrustAnchors::System`] is a hard error.
+/// That tier does not check the hostname, so over the public web PKI it would
+/// accept any publicly issued certificate for any name -- see the guard below.
 pub fn client_config(resolved: &Resolved) -> anyhow::Result<ClientConfig> {
     let trust_anchors = &resolved.trust_anchors;
     let provider = provider();
@@ -120,13 +124,29 @@ pub fn client_config(resolved: &Resolved) -> anyhow::Result<ClientConfig> {
         Verification::Full => builder
             .with_webpki_verifier(webpki_verifier(&provider, trust_anchors)?)
             .with_no_client_auth(),
-        Verification::ChainOnly => builder
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(ChainOnlyVerifier::new(webpki_verifier(
-                &provider,
-                trust_anchors,
-            )?)))
-            .with_no_client_auth(),
+        Verification::ChainOnly => {
+            // The public web PKI with no hostname check is not verification.
+            // `dsn::resolve` already forbids this pair at the DSN layer --
+            // PostgreSQL's documented rule that `sslrootcert=system` requires
+            // `sslmode=verify-full` -- so it is unreachable from a CLI
+            // invocation. This is the defense-in-depth second half, so that a
+            // hand-built `Resolved` cannot fail open either, exactly like the
+            // `TrustAnchors::None` guard in `root_store`.
+            if matches!(trust_anchors, TrustAnchors::System) {
+                return Err(anyhow!(
+                    "chain-only verification over the public certificate authorities is not \
+                     a supported combination: with no hostname check, any publicly issued \
+                     certificate for any name would be accepted. Use sslmode=verify-full \
+                     with sslrootcert=system, or name a private CA bundle"
+                ));
+            }
+            builder
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(ChainOnlyVerifier::new(
+                    webpki_verifier(&provider, trust_anchors)?,
+                )))
+                .with_no_client_auth()
+        }
         // Never reads the anchors: there is nothing to verify against.
         Verification::None => builder
             .dangerous()
@@ -212,12 +232,16 @@ mod tests {
     /// can catch it, because the panic happens at construction.
     ///
     /// The verifying tiers need an anchor source now (a verifier over zero
-    /// anchors is a hard error), so they are given the public roots.
+    /// anchors is a hard error). `Full` is given the public roots; `ChainOnly`
+    /// is given a private bundle, because `ChainOnly` over the public roots is
+    /// itself a hard error -- see
+    /// `chain_only_over_the_public_roots_is_rejected`.
     #[test]
     fn client_config_builds_for_every_tier() {
+        let dir = tempfile::tempdir().unwrap();
         let tiers = [
             (Verification::None, TrustAnchors::None),
-            (Verification::ChainOnly, TrustAnchors::System),
+            (Verification::ChainOnly, fixture_bundle(&dir)),
             (Verification::Full, TrustAnchors::System),
         ];
         for (verification, anchors) in tiers.iter() {
@@ -229,6 +253,37 @@ mod tests {
                 verification
             );
         }
+    }
+
+    /// `ChainOnly` over the public web PKI is refused at the connector layer.
+    ///
+    /// That pair would build a verifier over every public webpki root and then
+    /// wrap it in `ChainOnlyVerifier`, which maps a name mismatch to `Ok` --
+    /// i.e. any publicly issued certificate for any hostname would be accepted,
+    /// which is a full MITM. `dsn::resolve` already makes the pair unreachable
+    /// from a DSN (PostgreSQL's `sslrootcert=system` implies `verify-full`
+    /// rule), so this pins the second half of that defense: a hand-built
+    /// `Resolved` cannot fail open either.
+    ///
+    /// Red if the guard in `client_config` is removed -- the config would build.
+    #[test]
+    fn chain_only_over_the_public_roots_is_rejected() {
+        let err = client_config(&resolved(Verification::ChainOnly, TrustAnchors::System))
+            .expect_err("chain-only over the public roots must be a hard error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("public certificate authorities"),
+            "the error must say why the pair is refused: {}",
+            msg
+        );
+
+        // And the neighboring pairs still build, so this is not asserting that
+        // `ChainOnly` or `System` was removed wholesale.
+        let dir = tempfile::tempdir().unwrap();
+        client_config(&resolved(Verification::ChainOnly, fixture_bundle(&dir)))
+            .expect("chain-only over a private bundle must still build");
+        client_config(&resolved(Verification::Full, TrustAnchors::System))
+            .expect("verify-full over the public roots must still build");
     }
 
     /// A publicly trusted CA is **not** a trust anchor when a private bundle is

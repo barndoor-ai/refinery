@@ -67,7 +67,9 @@ const URL_PREFIXES: [&str; 2] = ["postgres://", "postgresql://"];
 ///   (`postgres` rejects it as an unknown option). It *is* the trust store, it
 ///   does not add to a default one, and it escalates every non-`disable`
 ///   `sslmode` to [`Verification::ChainOnly`] -- see below. The reserved value
-///   `system` selects the public webpki roots instead of a file.
+///   `system` selects the public webpki roots instead of a file. An **empty**
+///   value is treated as unset, matching libpq -- the key is still consumed and
+///   stripped, because `postgres` rejects it either way.
 /// * `currentSchema` is consumed and lifted into [`Resolved::current_schema`]
 ///   (same reason), where the CLI uses it as the migration-table schema
 ///   fallback.
@@ -123,6 +125,12 @@ const URL_PREFIXES: [&str; 2] = ["postgres://", "postgresql://"];
 /// mode -- `disable`, `require`, `verify-ca` included -- is a hard error. That
 /// is what makes "verify-ca over the public web PKI" unrepresentable here.
 ///
+/// That rule is the DSN half of a two-layer guard:
+/// [`Verification::ChainOnly`] with [`TrustAnchors::System`] is an invalid pair
+/// that `resolve` never returns, and
+/// [`crate::pg_tls::tls::client_config`] refuses to build it as well, so a
+/// hand-built [`Resolved`] cannot reconstruct it.
+///
 /// # Only the URL DSN form is supported
 ///
 /// `postgres::Config::from_str` accepts two forms and dispatches on the
@@ -152,6 +160,12 @@ pub fn resolve(dsn: &str) -> anyhow::Result<Resolved> {
     let mut requested: Option<SslMode> = None;
     let mut trust_anchors = TrustAnchors::None;
     let mut current_schema: Option<String> = None;
+    // Whether any key was consumed and stripped, which is what decides between
+    // handing the input back byte-for-byte and rebuilding the query. It is not
+    // the same question as "did a value survive": an empty `sslrootcert` means
+    // "unset", but the key is still stripped, because `postgres::Config`
+    // rejects `sslrootcert` as an unknown option.
+    let mut consumed_any = false;
     // Raw, still-encoded `k=v` segments, kept exactly as the operator wrote
     // them.
     let mut retained: Vec<&str> = Vec::new();
@@ -162,18 +176,32 @@ pub fn resolve(dsn: &str) -> anyhow::Result<Resolved> {
             None => segment,
         };
         match key {
-            SSL_MODE => requested = Some(SslMode::parse(&decode_value(segment))?),
+            SSL_MODE => {
+                consumed_any = true;
+                requested = Some(SslMode::parse(&decode_value(segment))?);
+            }
             SSL_ROOT_CERT => {
+                consumed_any = true;
                 let value = decode_value(segment);
-                // `system` is libpq's reserved value for the platform's
-                // certificate authorities; anything else is a file path.
-                trust_anchors = if value == SYSTEM_ROOT_CERT {
+                trust_anchors = if value.is_empty() {
+                    // libpq treats an empty `sslrootcert` as unset. Taking it
+                    // as a path instead would satisfy the `verify-ca` /
+                    // `verify-full` anchor gate, escalate the weaker modes, and
+                    // then die at `File::open("")` with a blank path in the
+                    // message.
+                    TrustAnchors::None
+                } else if value == SYSTEM_ROOT_CERT {
+                    // `system` is libpq's reserved value for the platform's
+                    // certificate authorities; anything else is a file path.
                     TrustAnchors::System
                 } else {
                     TrustAnchors::Bundle(PathBuf::from(value))
                 };
             }
-            CURRENT_SCHEMA => current_schema = Some(decode_value(segment)),
+            CURRENT_SCHEMA => {
+                consumed_any = true;
+                current_schema = Some(decode_value(segment));
+            }
             SSL_CERT | SSL_KEY => {
                 return Err(anyhow!(
                     "client-certificate authentication is not supported; remove {:?} \
@@ -244,32 +272,33 @@ pub fn resolve(dsn: &str) -> anyhow::Result<Resolved> {
         }
     };
 
-    let rewritten =
-        if requested.is_none() && !trust_anchors.is_configured() && current_schema.is_none() {
-            // Nothing was consumed, so nothing needs rebuilding: hand back the
-            // input byte-for-byte. Notably this leaves a query-less DSN without
-            // a trailing `?`. Note that `sslrootcert=system` promotes `requested`
-            // to `Some(VerifyFull)` above, so that case rebuilds with
-            // `sslmode=require` as it must.
-            dsn.to_string()
+    let rewritten = if !consumed_any {
+        // Nothing was consumed, so nothing needs rebuilding: hand back the
+        // input byte-for-byte. Notably this leaves a query-less DSN without
+        // a trailing `?`. Note that `sslrootcert=system` promotes `requested`
+        // to `Some(VerifyFull)` above, so that case rebuilds with
+        // `sslmode=require` as it must -- and an empty `sslrootcert`, which
+        // resolves to no anchors at all, still rebuilds, because the key has
+        // to be stripped either way.
+        dsn.to_string()
+    } else {
+        let mut rebuilt = retained.join("&");
+        if requested.is_some() {
+            if !rebuilt.is_empty() {
+                rebuilt.push('&');
+            }
+            // Every value `SslMode::effective` can return is lowercase
+            // ASCII, so it needs no escaping.
+            rebuilt.push_str(SSL_MODE);
+            rebuilt.push('=');
+            rebuilt.push_str(effective);
+        }
+        if rebuilt.is_empty() {
+            base.to_string()
         } else {
-            let mut rebuilt = retained.join("&");
-            if requested.is_some() {
-                if !rebuilt.is_empty() {
-                    rebuilt.push('&');
-                }
-                // Every value `SslMode::effective` can return is lowercase
-                // ASCII, so it needs no escaping.
-                rebuilt.push_str(SSL_MODE);
-                rebuilt.push('=');
-                rebuilt.push_str(effective);
-            }
-            if rebuilt.is_empty() {
-                base.to_string()
-            } else {
-                format!("{}?{}", base, rebuilt)
-            }
-        };
+            format!("{}?{}", base, rebuilt)
+        }
+    };
 
     Ok(Resolved {
         dsn: rewritten,
@@ -704,6 +733,80 @@ mod tests {
             "a bundle supplied with no sslmode must not be silently discarded"
         );
         assert_eq!(resolved.dsn, BASE);
+    }
+
+    /// An empty `sslrootcert` means "unset", exactly as libpq treats it.
+    ///
+    /// Read as a path instead, `PathBuf::from("")` reports `is_configured()`
+    /// true: it would satisfy the `verify-ca` / `verify-full` anchor gate,
+    /// escalate `prefer` / `require` to `ChainOnly`, and then fail at
+    /// `File::open("")` with a message ending in a blank path. Red on every
+    /// count if the empty case stops mapping to `TrustAnchors::None`.
+    #[test]
+    fn an_empty_sslrootcert_is_treated_as_unset() {
+        // Alone: no anchors, and the key is still stripped -- `postgres`
+        // rejects `sslrootcert` as an unknown option, so it cannot be handed
+        // through by the untouched-DSN passthrough. With nothing else in the
+        // query that leaves the bare base and no trailing `?`.
+        let alone = resolve(&format!("{}?sslrootcert=", BASE)).unwrap();
+        assert_eq!(alone.trust_anchors, TrustAnchors::None);
+        assert_eq!(alone.verification, Verification::None);
+        assert_eq!(alone.dsn, BASE, "an empty sslrootcert must be stripped");
+        assert!(
+            !alone.dsn.contains('?'),
+            "stripping the only parameter must not leave a dangling `?`: {}",
+            alone.dsn
+        );
+        alone
+            .dsn
+            .parse::<PgConfig>()
+            .expect("the rewritten DSN must parse");
+
+        // And alongside other parameters it is stripped without disturbing
+        // them.
+        let with_others = resolve(&format!(
+            "{}?application_name=refinery&sslrootcert=&sslmode=require",
+            BASE
+        ))
+        .unwrap();
+        assert_eq!(with_others.trust_anchors, TrustAnchors::None);
+        assert_eq!(
+            with_others.dsn,
+            format!("{}?application_name=refinery&sslmode=require", BASE)
+        );
+
+        // It must not escalate the weaker modes: there is no anchor to verify
+        // against.
+        for mode in ["prefer", "require"].iter() {
+            let resolved = resolve(&format!("{}?sslmode={}&sslrootcert=", BASE, mode)).unwrap();
+            assert_eq!(
+                resolved.verification,
+                Verification::None,
+                "sslmode={} + an empty sslrootcert must not escalate",
+                mode
+            );
+        }
+
+        // And it must not satisfy the verify-* anchor gate: the operator gets
+        // the "requires a trust anchor" error, not a confusing file-open
+        // failure on an empty path.
+        for mode in ["verify-ca", "verify-full"].iter() {
+            let err = resolve(&format!("{}?sslmode={}&sslrootcert=", BASE, mode))
+                .expect_err("an empty sslrootcert must not satisfy the anchor requirement");
+            let msg = err.to_string();
+            assert!(
+                msg.contains(&format!("sslmode={}", mode)),
+                "sslmode={}: expected the trust-anchor error: {}",
+                mode,
+                msg
+            );
+            assert!(
+                !msg.contains("failed to read CA bundle"),
+                "sslmode={}: must not surface as a file-open failure: {}",
+                mode,
+                msg
+            );
+        }
     }
 
     #[test]
