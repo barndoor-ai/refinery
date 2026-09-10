@@ -2,6 +2,10 @@
 
 mod cli;
 mod migrate;
+// The Postgres TLS stack; only built when the postgresql feature is on so that
+// e.g. `--no-default-features -F mysql` still compiles.
+#[cfg(feature = "postgresql")]
+mod pg_tls;
 mod setup;
 
 use anyhow::Error;

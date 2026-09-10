@@ -53,6 +53,9 @@ fn run_migrations(
             .with_context(|| format!("could not read migration file name {}", path.display()))?;
         migrations.push(migration);
     }
+    // `mut` is only needed by the branches that hand the `Config` itself to
+    // `Runner` as the connection; the Postgres branch builds its own client.
+    #[allow(unused_mut)]
     let mut config = config(config_location, env_var_opt)?;
 
     let target = match (fake, target) {
@@ -90,9 +93,66 @@ fn run_migrations(
                 }
             }
         }
-        _db_type @ (ConfigDbType::Mysql | ConfigDbType::Postgres | ConfigDbType::Sqlite) => {
+        // Postgres does NOT go through `Runner::run(&mut config)`: that path
+        // rebuilds the URL from the parsed `Config`, dropping the query string
+        // (and therefore `sslmode`), and hardcodes `postgres::NoTls`. We build
+        // the client ourselves from the raw DSN instead -- see `crate::pg_tls`.
+        ConfigDbType::Postgres => {
             cfg_if::cfg_if! {
-                if #[cfg(any(feature = "mysql", feature = "postgresql", feature = "sqlite"))] {
+                if #[cfg(feature = "postgresql")] {
+                    use refinery_core::postgres::NoTls;
+                    use tokio_postgres_rustls::MakeRustlsConnect;
+
+                    let raw_dsn = postgres_dsn(config_location, env_var_opt)?;
+                    let (mut pg_config, resolved) = crate::pg_tls::prepare(&raw_dsn)?;
+
+                    // Same precedence as before this change: in `-e <ENV_VAR>`
+                    // mode `DATABASE_PASSWORD`, when set, overrides any password
+                    // carried in the DSN. In `--config <toml>` mode it is NOT
+                    // consulted at all -- `config()`'s toml branch never touched
+                    // it, and applying it there would let an unrelated exported
+                    // `DATABASE_PASSWORD` override the file's `db_pass`.
+                    // Setting it on the parsed config rather than splicing it
+                    // into a URL also removes the URL-encoding hazard of the old
+                    // rebuild.
+                    if env_var_opt.is_some() {
+                        if let Ok(db_pass) = std::env::var("DATABASE_PASSWORD") {
+                            pg_config.password(db_pass.as_bytes());
+                        }
+                    }
+
+                    let mut client = if resolved.effective == "disable" {
+                        pg_config
+                            .connect(NoTls)
+                            .context("could not connect to database")?
+                    } else {
+                        let tls_config = crate::pg_tls::tls::client_config(&resolved)
+                            .context("could not configure TLS for the database connection")?;
+                        pg_config
+                            .connect(MakeRustlsConnect::new(tls_config))
+                            .context("could not connect to database over TLS")?
+                    };
+
+                    Runner::new(&migrations)
+                        .set_grouped(grouped)
+                        .set_abort_divergent(divergent)
+                        .set_abort_missing(missing)
+                        .set_target(target)
+                        .set_migration_table_name(table_name)
+                        .set_migration_table_schema(migration_table_schema(
+                            table_schema,
+                            resolved.current_schema.as_deref(),
+                            config.db_schema(),
+                        ))
+                        .run(&mut client)?;
+                } else {
+                    panic!("tried to migrate from config for a postgresql database, but the postgresql feature was not enabled!");
+                }
+            }
+        }
+        _db_type @ (ConfigDbType::Mysql | ConfigDbType::Sqlite) => {
+            cfg_if::cfg_if! {
+                if #[cfg(any(feature = "mysql", feature = "sqlite"))] {
                     Runner::new(&migrations)
                         .set_grouped(grouped)
                         .set_abort_divergent(divergent)
@@ -111,16 +171,148 @@ fn run_migrations(
     Ok(())
 }
 
+/// The migration table's schema, in precedence order.
+///
+/// `dsn_current_schema` precedes `config_db_schema` deliberately. In
+/// `-e <ENV_VAR>` mode the two have the SAME source -- `Config`'s
+/// `TryFrom<Url>` already sets `db_schema` from the DSN's `currentSchema` --
+/// but they disagree on decoding: `Url::query_pairs()` is form-urlencoded, so a
+/// `+` becomes a space, while `pg_tls::dsn`'s `decode_value` percent-decodes
+/// and leaves the `+` literal, matching what `tokio-postgres` does with query
+/// values. So `?currentSchema=llm+gw` must resolve to `llm+gw`, and only the
+/// DSN-derived value gets that right. In `--config <toml>` mode
+/// `dsn_current_schema` is always `None`, so `config_db_schema` still supplies
+/// `[main] db_schema`.
+///
+/// Extracted from the call site so the ordering is testable: `run_migrations`
+/// needs a database, so an inline `.or()` chain could be reordered without any
+/// test noticing.
+#[cfg(feature = "postgresql")]
+fn migration_table_schema<'a>(
+    table_schema: Option<&'a str>,
+    dsn_current_schema: Option<&'a str>,
+    config_db_schema: Option<&'a str>,
+) -> Option<&'a str> {
+    table_schema.or(dsn_current_schema).or(config_db_schema)
+}
+
 fn config(config_location: &Path, env_var_opt: Option<&str>) -> anyhow::Result<Config> {
     if let Some(env_var) = env_var_opt {
-        Config::from_env_var(env_var).map(|config| {
-            if let Ok(db_pass) = std::env::var("DATABASE_PASSWORD") {
-                config.set_db_pass(&db_pass)
-            } else {
-                config
-            }
-        }).context("could not environment variable")
+        Config::from_env_var(env_var)
+            .map(|config| {
+                if let Ok(db_pass) = std::env::var("DATABASE_PASSWORD") {
+                    config.set_db_pass(&db_pass)
+                } else {
+                    config
+                }
+            })
+            .context("could not environment variable")
     } else {
         Config::from_file_location(config_location).context("could not parse the config file")
+    }
+}
+
+/// The **raw** Postgres DSN, query string and all.
+///
+/// `Config::from_env_var` cannot be used for this: it parses the URL and
+/// `build_db_url` then rebuilds it without the query, which is exactly the bug
+/// `crate::pg_tls` exists to fix. So the environment variable is read directly.
+///
+/// A `refinery.toml` cannot express a query string, so for the `--config` mode
+/// the DSN is synthesized from the file the same way `build_db_url` would have
+/// done -- nothing is lost, and the Postgres path then gets TLS in that mode
+/// too. The `[main] db_schema` key is picked up separately, from the parsed
+/// `Config`.
+#[cfg(feature = "postgresql")]
+fn postgres_dsn(config_location: &Path, env_var_opt: Option<&str>) -> anyhow::Result<String> {
+    if let Some(env_var) = env_var_opt {
+        return std::env::var(env_var)
+            .with_context(|| format!("couldn't find {} environment variable", env_var));
+    }
+
+    let file = std::fs::read_to_string(config_location)
+        .with_context(|| format!("could not open config file {}", config_location.display()))?;
+    let parsed: toml::Value = toml::from_str(&file).context("could not parse the config file")?;
+    let main = parsed
+        .get("main")
+        .context("config file is missing the [main] table")?;
+    let field = |name: &str| main.get(name).and_then(toml::Value::as_str);
+
+    let mut url = String::from("postgresql://");
+    let user = field("db_user");
+    if let Some(user) = user {
+        url.push_str(user);
+    }
+    if let Some(pass) = field("db_pass") {
+        url.push(':');
+        url.push_str(pass);
+    }
+    if let Some(host) = field("db_host") {
+        if user.is_some() {
+            url.push('@');
+        }
+        url.push_str(host);
+    }
+    if let Some(port) = field("db_port") {
+        url.push(':');
+        url.push_str(port);
+    }
+    if let Some(name) = field("db_name") {
+        url.push('/');
+        url.push_str(name);
+    }
+    Ok(url)
+}
+
+#[cfg(all(test, feature = "postgresql"))]
+mod tests {
+    use super::migration_table_schema;
+
+    /// `--table-schema` is the operator's explicit override and beats both
+    /// other sources.
+    #[test]
+    fn the_cli_flag_wins() {
+        assert_eq!(
+            migration_table_schema(Some("flag"), Some("from_dsn"), Some("from_config")),
+            Some("flag")
+        );
+        assert_eq!(
+            migration_table_schema(Some("flag"), None, None),
+            Some("flag")
+        );
+    }
+
+    /// The DSN's `currentSchema` beats the reparsed config's `db_schema`.
+    ///
+    /// The fixture is the real divergence rather than an abstract ordering:
+    /// `?currentSchema=llm+gw` produces `"llm+gw"` from `pg_tls::dsn`'s
+    /// `percent_decode_str` (which matches `tokio-postgres`) and `"llm gw"`
+    /// from `refinery_core::config`'s `url.query_pairs()`, which is
+    /// `form_urlencoded` and decodes a `+` as a space. Migrating against
+    /// `"llm gw"` would create the migration table in the wrong schema.
+    ///
+    /// Red if the `.or()` chain is reordered back.
+    #[test]
+    fn the_dsn_beats_the_reparsed_config_when_they_disagree() {
+        assert_eq!(
+            migration_table_schema(None, Some("llm+gw"), Some("llm gw")),
+            Some("llm+gw")
+        );
+    }
+
+    /// `--config <toml>` mode: there is no DSN query string, so
+    /// `dsn_current_schema` is always `None` and `[main] db_schema` supplies
+    /// the value.
+    #[test]
+    fn the_config_supplies_the_schema_when_nothing_else_does() {
+        assert_eq!(
+            migration_table_schema(None, None, Some("from_config")),
+            Some("from_config")
+        );
+    }
+
+    #[test]
+    fn no_source_yields_none() {
+        assert_eq!(migration_table_schema(None, None, None), None);
     }
 }

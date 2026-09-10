@@ -268,8 +268,13 @@ impl FromStr for Config {
     /// create a new Config instance from a string that contains a URL
     fn from_str(url_str: &str) -> Result<Config, Self::Err> {
         let url = Url::parse(url_str).map_err(|_| {
+            // NOTE: deliberately does NOT interpolate `url_str`. A DSN carries
+            // a password, and the refinery CLI returns this error up to
+            // `main`, where Rust's `Termination` impl prints it to stderr.
             Error::new(
-                Kind::ConfigError(format!("Couldn't parse the string '{}' as a URL", url_str)),
+                Kind::ConfigError(
+                    "Couldn't parse the database connection string as a URL".to_string(),
+                ),
                 None,
             )
         })?;

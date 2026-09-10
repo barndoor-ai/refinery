@@ -81,6 +81,12 @@ macro_rules! with_connection {
             ConfigDbType::Postgres => {
                 cfg_if::cfg_if! {
                     if #[cfg(feature = "postgres")] {
+                        // NOTE: the refinery CLI no longer routes Postgres through this
+                        // macro. `build_db_url` drops the DSN's whole query string (so
+                        // `sslmode` never arrives) and `NoTls` cannot do TLS at all;
+                        // the CLI builds its own `postgres::Client` with a rustls
+                        // connector instead (see `refinery_cli/src/pg_tls`).
+                        // Re-pointing the CLI here would silently drop TLS again.
                         let path = build_db_url("postgresql", &$config);
                         let conn = postgres::Client::connect(path.as_str(), postgres::NoTls).migration_err("could not connect to database", None)?;
                         $op(conn)
@@ -122,6 +128,12 @@ macro_rules! with_connection_async {
             ConfigDbType::Postgres => {
                 cfg_if::cfg_if! {
                     if #[cfg(feature = "tokio-postgres")] {
+                        // NOTE: same caveat as the sync macro above -- `build_db_url`
+                        // drops the DSN query string (so `sslmode` never arrives) and
+                        // `NoTls` cannot do TLS. The refinery CLI does not use this
+                        // path for Postgres; it builds its own client with a rustls
+                        // connector (see `refinery_cli/src/pg_tls`). Re-pointing it
+                        // here would silently drop TLS again.
                         let path = build_db_url("postgresql", $config);
                         let (client, connection ) = tokio_postgres::connect(path.as_str(), tokio_postgres::NoTls).await.migration_err("could not connect to database", None)?;
                         tokio::spawn(async move {
